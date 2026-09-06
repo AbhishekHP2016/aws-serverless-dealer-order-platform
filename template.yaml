@@ -1,0 +1,520 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Dealer Order Platform - SAM v2 isolated stack
+
+Parameters:
+  FailureEmail:
+    Type: String
+    Default: ''
+    Description: Optional email address for order failure notifications
+
+Conditions:
+  HasFailureEmail: !Not [!Equals [!Ref FailureEmail, '']]
+
+Globals:
+  Function:
+    Runtime: python3.14
+    Handler: lambda_function.lambda_handler
+    Timeout: 10
+    MemorySize: 256
+    Tracing: Active
+    Environment:
+      Variables:
+        POWERTOOLS_SERVICE_NAME: dealer-platform-samv2
+
+Resources:
+
+  # ----------------------------
+  # Data
+  # ----------------------------
+  ProductsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: dealer-samv2-products-dev
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: product_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: product_id
+          KeyType: HASH
+
+  CartTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: dealer-samv2-cart-dev
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: product_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: product_id
+          KeyType: RANGE
+
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: dealer-samv2-orders-dev
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: order_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: order_id
+          KeyType: HASH
+
+  # ----------------------------
+  # Cognito
+  # ----------------------------
+  DealerUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: dealer-samv2-users-dev
+      UsernameAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+
+  DealerUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref DealerUserPool
+      ClientName: dealer-samv2-api-app-dev
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  # ----------------------------
+  # REST API + Cognito authorizer
+  # ----------------------------
+  DealerApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: dealer-platform-api-samv2-dev
+      StageName: SamDev
+      EndpointConfiguration: REGIONAL
+      TracingEnabled: true
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization,Idempotency-Key'"
+        AllowOrigin: "'*'"
+      GatewayResponses:
+        DEFAULT_4XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: "'*'"
+              Access-Control-Allow-Headers: "'Content-Type,Authorization,Idempotency-Key'"
+              Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        DEFAULT_5XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: "'*'"
+              Access-Control-Allow-Headers: "'Content-Type,Authorization,Idempotency-Key'"
+              Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+      Auth:
+        DefaultAuthorizer: DealerCognitoAuthorizer
+        AddDefaultAuthorizerToCorsPreflight: false
+        Authorizers:
+          DealerCognitoAuthorizer:
+            UserPoolArn: !GetAtt DealerUserPool.Arn
+            Identity:
+              Header: Authorization
+
+  # ----------------------------
+  # API Lambdas
+  # ----------------------------
+  ProductsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: dealer-samv2-products-api-dev
+      CodeUri: src/products/
+      Environment:
+        Variables:
+          PRODUCTS_TABLE: !Ref ProductsTable
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Scan
+              Resource: !GetAtt ProductsTable.Arn
+      Events:
+        GetProducts:
+          Type: Api
+          Properties:
+            RestApiId: !Ref DealerApi
+            Path: /products
+            Method: GET
+        GetProduct:
+          Type: Api
+          Properties:
+            RestApiId: !Ref DealerApi
+            Path: /products/{product_id}
+            Method: GET
+
+  CartFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: dealer-samv2-cart-api-dev
+      CodeUri: src/cart/
+      Environment:
+        Variables:
+          CART_TABLE: !Ref CartTable
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Query
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+                - dynamodb:BatchWriteItem
+              Resource: !GetAtt CartTable.Arn
+      Events:
+        GetCart:
+          Type: Api
+          Properties:
+            RestApiId: !Ref DealerApi
+            Path: /cart/{user_id}
+            Method: GET
+        PutCart:
+          Type: Api
+          Properties:
+            RestApiId: !Ref DealerApi
+            Path: /cart/{user_id}
+            Method: PUT
+        DeleteCart:
+          Type: Api
+          Properties:
+            RestApiId: !Ref DealerApi
+            Path: /cart/{user_id}
+            Method: DELETE
+
+  OrdersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: dealer-samv2-orders-api-dev
+      CodeUri: src/orders/
+      Environment:
+        Variables:
+          ORDERS_TABLE: !Ref OrdersTable
+          STATE_MACHINE_ARN: !Ref OrderWorkflow
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource: !GetAtt OrdersTable.Arn
+            - Effect: Allow
+              Action:
+                - states:StartExecution
+              Resource: !Ref OrderWorkflow
+      Events:
+        PostOrder:
+          Type: Api
+          Properties:
+            RestApiId: !Ref DealerApi
+            Path: /orders
+            Method: POST
+        GetOrder:
+          Type: Api
+          Properties:
+            RestApiId: !Ref DealerApi
+            Path: /orders/{order_id}
+            Method: GET
+
+  # ----------------------------
+  # Workflow worker Lambdas
+  # ----------------------------
+  ValidateOrderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: dealer-samv2-validate-order-dev
+      CodeUri: src/validate_order/
+
+  ReserveInventoryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: dealer-samv2-reserve-inventory-dev
+      CodeUri: src/reserve_inventory/
+      Environment:
+        Variables:
+          PRODUCTS_TABLE: !Ref ProductsTable
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:UpdateItem
+              Resource: !GetAtt ProductsTable.Arn
+
+  CreateOrderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: dealer-samv2-create-order-dev
+      CodeUri: src/create_order/
+      Environment:
+        Variables:
+          ORDERS_TABLE: !Ref OrdersTable
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+              Resource: !GetAtt OrdersTable.Arn
+
+  ReleaseInventoryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: dealer-samv2-release-inventory-dev
+      CodeUri: src/release_inventory/
+      Environment:
+        Variables:
+          PRODUCTS_TABLE: !Ref ProductsTable
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:UpdateItem
+              Resource: !GetAtt ProductsTable.Arn
+
+  # ----------------------------
+  # SNS failure notification
+  # ----------------------------
+  FailureTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: dealer-samv2-order-failures-dev
+
+  FailureEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasFailureEmail
+    Properties:
+      TopicArn: !Ref FailureTopic
+      Protocol: email
+      Endpoint: !Ref FailureEmail
+
+  # ----------------------------
+  # EventBridge -> SQS -> Fulfillment
+  # ----------------------------
+  DealerEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: dealer-samv2-events-dev
+
+  FulfillmentDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: dealer-samv2-fulfillment-dlq-dev
+      MessageRetentionPeriod: 1209600
+
+  FulfillmentQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: dealer-samv2-fulfillment-dev
+      VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt FulfillmentDLQ.Arn
+        maxReceiveCount: 3
+
+  OrderPlacedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: dealer-samv2-order-placed-dev
+      EventBusName: !Ref DealerEventBus
+      State: ENABLED
+      EventPattern:
+        source:
+          - dealer.orders
+        detail-type:
+          - OrderPlaced
+      Targets:
+        - Id: FulfillmentQueueTarget
+          Arn: !GetAtt FulfillmentQueue.Arn
+
+  FulfillmentQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref FulfillmentQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowEventBridgeSendMessage
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action:
+              - sqs:SendMessage
+            Resource: !GetAtt FulfillmentQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt OrderPlacedRule.Arn
+
+  FulfillmentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: dealer-samv2-fulfillment-dev
+      CodeUri: src/fulfillment/
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - sqs:ReceiveMessage
+                - sqs:DeleteMessage
+                - sqs:GetQueueAttributes
+              Resource: !GetAtt FulfillmentQueue.Arn
+      Events:
+        FulfillmentQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt FulfillmentQueue.Arn
+            BatchSize: 1
+            Enabled: true
+
+  # ----------------------------
+  # Step Functions execution role
+  # ----------------------------
+  OrderWorkflowRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: dealer-samv2-stepfunctions-role-dev
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - states.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: dealer-samv2-stepfunctions-policy-dev
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt ValidateOrderFunction.Arn
+                  - !GetAtt ReserveInventoryFunction.Arn
+                  - !GetAtt CreateOrderFunction.Arn
+                  - !GetAtt ReleaseInventoryFunction.Arn
+              - Effect: Allow
+                Action:
+                  - events:PutEvents
+                Resource: !GetAtt DealerEventBus.Arn
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref FailureTopic
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                  - xray:GetSamplingRules
+                  - xray:GetSamplingTargets
+                Resource: '*'
+
+  OrderWorkflow:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: dealer-samv2-order-workflow-dev
+      Type: STANDARD
+      Role: !GetAtt OrderWorkflowRole.Arn
+      Tracing:
+        Enabled: true
+      DefinitionUri: statemachine/order-workflow.asl.yaml
+      DefinitionSubstitutions:
+        ValidateOrderFunctionArn: !GetAtt ValidateOrderFunction.Arn
+        ReserveInventoryFunctionArn: !GetAtt ReserveInventoryFunction.Arn
+        CreateOrderFunctionArn: !GetAtt CreateOrderFunction.Arn
+        ReleaseInventoryFunctionArn: !GetAtt ReleaseInventoryFunction.Arn
+        FailureTopicArn: !Ref FailureTopic
+        EventBusName: !Ref DealerEventBus
+
+  # ----------------------------
+  # WAF - one deterministic demo blocking rule
+  # WARNING: AWS WAF is billable while provisioned.
+  # ----------------------------
+  DealerApiWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: dealer-samv2-api-waf-dev
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: dealer-samv2-api-waf-dev
+        SampledRequestsEnabled: true
+      Rules:
+        - Name: BlockDemoUserAgent
+          Priority: 0
+          Action:
+            Block: {}
+          Statement:
+            ByteMatchStatement:
+              SearchString: BlockedDemoClient
+              FieldToMatch:
+                SingleHeader:
+                  Name: user-agent
+              PositionalConstraint: CONTAINS
+              TextTransformations:
+                - Priority: 0
+                  Type: NONE
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: dealer-samv2-block-demo-user-agent
+            SampledRequestsEnabled: true
+
+  DealerApiWebACLAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    DependsOn:
+      - DealerApiSamDevStage
+    Properties:
+      WebACLArn: !GetAtt DealerApiWebACL.Arn
+      ResourceArn: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/restapis/${DealerApi}/stages/SamDev
+
+Outputs:
+  ApiUrl:
+    Description: REST API base URL
+    Value: !Sub https://${DealerApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/SamDev
+
+  UserPoolId:
+    Value: !Ref DealerUserPool
+
+  UserPoolClientId:
+    Value: !Ref DealerUserPoolClient
+
+  OrderWorkflowArn:
+    Value: !Ref OrderWorkflow
+
+  ProductsTableName:
+    Value: !Ref ProductsTable
+
+  OrdersTableName:
+    Value: !Ref OrdersTable
+
+  EventBusName:
+    Value: !Ref DealerEventBus
+
+  FulfillmentQueueUrl:
+    Value: !Ref FulfillmentQueue
+
+  FulfillmentDLQUrl:
+    Value: !Ref FulfillmentDLQ
+
+  WebACLArn:
+    Value: !GetAtt DealerApiWebACL.Arn

@@ -1,0 +1,113 @@
+Comment: Dealer order workflow with Saga-style inventory compensation
+QueryLanguage: JSONata
+StartAt: ValidateOrder
+
+States:
+
+  ValidateOrder:
+    Type: Task
+    Resource: arn:aws:states:::lambda:invoke
+    Arguments:
+      FunctionName: ${ValidateOrderFunctionArn}
+      Payload: "{% $states.input %}"
+    Output: "{% $states.result.Payload %}"
+    Retry:
+      - ErrorEquals:
+          - Lambda.ServiceException
+          - Lambda.AWSLambdaException
+          - Lambda.SdkClientException
+          - Lambda.TooManyRequestsException
+        IntervalSeconds: 1
+        MaxAttempts: 3
+        BackoffRate: 2
+        JitterStrategy: FULL
+    Next: IsOrderValid
+
+  IsOrderValid:
+    Type: Choice
+    Choices:
+      - Condition: "{% $states.input.valid = true %}"
+        Next: ReserveInventory
+    Default: NotifyFailure
+
+  ReserveInventory:
+    Type: Task
+    Resource: arn:aws:states:::lambda:invoke
+    Arguments:
+      FunctionName: ${ReserveInventoryFunctionArn}
+      Payload: "{% $states.input %}"
+    Output: "{% $states.result.Payload %}"
+    Retry:
+      - ErrorEquals:
+          - Lambda.ServiceException
+          - Lambda.AWSLambdaException
+          - Lambda.SdkClientException
+          - Lambda.TooManyRequestsException
+        IntervalSeconds: 1
+        MaxAttempts: 3
+        BackoffRate: 2
+        JitterStrategy: FULL
+    Next: CreateOrder
+
+  CreateOrder:
+    Type: Task
+    Resource: arn:aws:states:::lambda:invoke
+    Arguments:
+      FunctionName: ${CreateOrderFunctionArn}
+      Payload: "{% $states.input %}"
+    Output: "{% $states.result.Payload %}"
+    Retry:
+      - ErrorEquals:
+          - Lambda.ServiceException
+          - Lambda.AWSLambdaException
+          - Lambda.SdkClientException
+          - Lambda.TooManyRequestsException
+        IntervalSeconds: 1
+        MaxAttempts: 3
+        BackoffRate: 2
+        JitterStrategy: FULL
+    Catch:
+      - ErrorEquals:
+          - States.ALL
+        Output: "{% $states.input %}"
+        Next: ReleaseInventory
+    Next: PublishOrderPlaced
+
+  ReleaseInventory:
+    Type: Task
+    Resource: arn:aws:states:::lambda:invoke
+    Arguments:
+      FunctionName: ${ReleaseInventoryFunctionArn}
+      Payload: "{% $states.input %}"
+    Output: "{% $states.result.Payload %}"
+    Retry:
+      - ErrorEquals:
+          - Lambda.ServiceException
+          - Lambda.AWSLambdaException
+          - Lambda.SdkClientException
+          - Lambda.TooManyRequestsException
+        IntervalSeconds: 1
+        MaxAttempts: 3
+        BackoffRate: 2
+        JitterStrategy: FULL
+    Next: NotifyFailure
+
+  PublishOrderPlaced:
+    Type: Task
+    Resource: arn:aws:states:::events:putEvents
+    Arguments:
+      Entries:
+        - EventBusName: ${EventBusName}
+          Source: dealer.orders
+          DetailType: OrderPlaced
+          Detail: "{% $states.input %}"
+    End: true
+
+  NotifyFailure:
+    Type: Task
+    Resource: arn:aws:states:::sns:publish
+    Arguments:
+      TopicArn: ${FailureTopicArn}
+      Subject: Dealer order processing failure
+      Message: "{% $string($states.input) %}"
+    End: true

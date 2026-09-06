@@ -1,0 +1,15 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "dealer-platform-samv2-dev"
+resolve_s3 = true
+s3_prefix = "dealer-platform-samv2-dev"
+region = "eu-central-1"
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+confirm_changeset = true
+fail_on_empty_changeset = false
+parameter_overrides = "FailureEmail=\"\""
+image_repositories = []
+
+[default.global.parameters]
+region = "eu-central-1"
