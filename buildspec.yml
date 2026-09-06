@@ -1,0 +1,22 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - python3 -m pip install --upgrade aws-sam-cli
+
+  pre_build:
+    commands:
+      - sam validate --lint
+
+  build:
+    commands:
+      - sam build
+      - sam package \
+          --template-file .aws-sam/build/template.yaml \
+          --s3-bucket "$PACKAGE_BUCKET" \
+          --output-template-file packaged.yaml
+
+artifacts:
+  files:
+    - packaged.yaml
