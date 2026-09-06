@@ -7,15 +7,19 @@ phases:
 
   pre_build:
     commands:
+      - echo "=== VALIDATING ==="
       - sam validate --lint
 
   build:
     commands:
+      - echo "=== BUILDING ==="
       - sam build
-      - sam package \
-          --template-file .aws-sam/build/template.yaml \
-          --s3-bucket "$PACKAGE_BUCKET" \
-          --output-template-file packaged.yaml
+      - echo "=== PACKAGE BUCKET ==="
+      - echo "$PACKAGE_BUCKET"
+      - sam package --template-file .aws-sam/build/template.yaml --s3-bucket "$PACKAGE_BUCKET" --output-template-file packaged.yaml
+      - echo "=== VERIFY PACKAGED TEMPLATE ==="
+      - ls -lh packaged.yaml
+      - aws s3 ls "s3://$PACKAGE_BUCKET/"
 
 artifacts:
   files:
