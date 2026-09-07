@@ -10,7 +10,7 @@ The goal was not simply to connect AWS services, but to design for consistency, 
 
 ## Architecture
 
-![Architecture](docs/architecture.png)
+![Architecture](./architecture.png)
 
 The solution combines three interaction patterns:
 
